@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quran Audio Archiver</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for in-browser JSX compilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: { 900: '#0f172a', 800: '#1e293b', 700: '#334155', 600: '#475569' },
+                        primary: { 500: '#10b981', 600: '#059669' }
+                    },
+                    fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] }
+                }
+            }
+        }
+    </script>
+    <style>
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+        body { background-color: #0f172a; color: #f8fafc; margin: 0; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        // --- Updated Constants ---
+        const API_MP3QURAN = 'https://www.mp3quran.net/api/v3/reciters?language=eng'; // Updated to V3
+        const API_ALQURAN_CLOUD = 'https://api.alquran.cloud/v1/edition/type/audio';
+        const API_QURAN_COM = 'https://api.quran.com/api/v4/resources/recitations';
+        const API_SURAH_LIST = 'https://api.alquran.cloud/v1/surah';
+
+        const SURAH_AYAH_COUNTS = [
+            7, 286, 200, 176, 120, 165, 206, 75, 129, 109, 123, 111, 43, 52, 99, 128, 111, 110, 98, 135,
+            112, 78, 118, 64, 77, 227, 93, 88, 69, 60, 34, 30, 73, 54, 45, 83, 182, 88, 75, 85, 54, 53,
+            89, 59, 37, 35, 38, 29, 18, 45, 60, 49, 62, 55, 78, 96, 29, 22, 24, 13, 14, 11, 11, 18, 12,
+            12, 30, 52, 52, 44, 28, 28, 20, 56, 40, 31, 50, 40, 46, 42, 29, 19, 36, 25, 22, 17, 19, 26,
+            30, 20, 15, 21, 11, 8, 8, 19, 5, 8, 8, 11, 11, 8, 3, 9, 5, 4, 7, 3, 6, 3, 5, 4, 5, 6
+        ];
+
+        // --- Icons ---
+        const IconPlay = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>;
+        const IconPause = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>;
+        const IconSkipBack = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>;
+        const IconSkipForward = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>;
+        const IconLoader = () => <svg className="animate-spin" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>;
+
+        // --- Helpers ---
+        const normalizeName = (name) => (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const pad = (num, length) => num.toString().padStart(length, '0');
+        const getGlobalAyah = (surah, ayah) => {
+            let global = 0;
+            for (let i = 0; i < surah - 1; i++) global += SURAH_AYAH_COUNTS[i];
+            return global + ayah;
+        };
+        const ensureHttps = (url) => url ? url.replace(/^http:\/\//i, 'https://') : null;
+
+        // Failsafe local storage wrappers
+        const safeSetItem = (key, value) => { try { localStorage.setItem(key, value); } catch (e) {} };
+        const safeGetItem = (key) => { try { return localStorage.getItem(key); } catch (e) { return null; } };
+
+        // Failsafe JSON fetch wrapper
+        const fetchJson = async (url) => {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            return res.json();
+        };
+
+        const App = () => {
+            const [reciters, setReciters] = useState([]);
+            const [surahs, setSurahs] = useState([]);
+            const [loadingState, setLoadingState] = useState('Initializing Database...');
+            const [searchTerm, setSearchTerm] = useState('');
+            
+            const [activeReciter, setActiveReciter] = useState(null);
+            const [activeSurah, setActiveSurah] = useState(1);
+            const [activeAyah, setActiveAyah] = useState(1);
+            const [playbackMode, setPlaybackMode] = useState('ayah');
+            
+            const audioRef = useRef(new Audio());
+            const [isPlaying, setIsPlaying] = useState(false);
+            const [isBuffering, setIsBuffering] = useState(false);
+            const [currentQueue, setCurrentQueue] = useState([]);
+            const [queueIndex, setQueueIndex] = useState(0);
+            const [playerStatus, setPlayerStatus] = useState('Ready to play');
+            const [audioError, setAudioError] = useState(false);
+
+            useEffect(() => {
+                const initData = async () => {
+                    // 1. Bulletproof Surah Fetching
+                    try {
+                        const cachedSurahs = safeGetItem('surahs_cache');
+                        if (cachedSurahs) {
+                            setSurahs(JSON.parse(cachedSurahs));
+                        } else {
+                            const data = await fetchJson(API_SURAH_LIST);
+                            if (data && data.data) {
+                                setSurahs(data.data);
+                                safeSetItem('surahs_cache', JSON.stringify(data.data));
+                            }
+                        }
+                    } catch (err) {
+                        console.warn('API_SURAH_LIST blocked/failed. Using fallback logic.');
+                        // Fallback automatically handled in UI (Array.from length: 114)
+                    }
+
+                    // 2. Bulletproof Reciters Fetching
+                    try {
+                        const cachedReciters = safeGetItem('reciters_cache');
+                        if (cachedReciters) {
+                            setReciters(JSON.parse(cachedReciters));
+                            setLoadingState('');
+                            return;
+                        }
+
+                        setLoadingState('Aggregating 500+ reciters from multiple sources...');
+                        
+                        const [resMp3, resAlq, resQc] = await Promise.allSettled([
+                            fetchJson(API_MP3QURAN),
+                            fetchJson(API_ALQURAN_CLOUD),
+                            fetchJson(API_QURAN_COM)
+                        ]);
+
+                        const map = new Map();
+
+                        // MP3Quran (V3 API) Safely
+                        if (resMp3.status === 'fulfilled' && resMp3.value?.reciters) {
+                            resMp3.value.reciters.forEach(r => {
+                                const name = r.name || r.englishName || 'Unknown';
+                                const norm = normalizeName(name);
+                                let server = '';
+                                let rewaya = 'Murattal';
+                                
+                                if (r.moshaf && r.moshaf.length > 0) {
+                                    server = r.moshaf[0].server;
+                                    rewaya = r.moshaf[0].name || 'Murattal';
+                                }
+
+                                if (server) {
+                                    map.set(norm, {
+                                        id: norm, name, normalizedName: norm,
+                                        sources: ['MP3Quran'], language: 'ar', style: rewaya,
+                                        mp3QuranServer: server
+                                    });
+                                }
+                            });
+                        }
+
+                        // AlQuran Cloud Safely
+                        if (resAlq.status === 'fulfilled' && resAlq.value?.data) {
+                            resAlq.value.data.forEach(r => {
+                                const name = r.englishName || r.name;
+                                const norm = normalizeName(name);
+                                if (map.has(norm)) {
+                                    const ex = map.get(norm);
+                                    ex.alQuranId = r.identifier;
+                                    if (!ex.sources.includes('AlQuran Cloud')) ex.sources.push('AlQuran Cloud');
+                                } else {
+                                    map.set(norm, {
+                                        id: norm, name, normalizedName: norm,
+                                        sources: ['AlQuran Cloud'], language: r.language || 'ar', style: 'Murattal',
+                                        alQuranId: r.identifier
+                                    });
+                                }
+                            });
+                        }
+
+                        // Quran.com Safely
+                        if (resQc.status === 'fulfilled' && resQc.value?.recitations) {
+                            resQc.value.recitations.forEach(r => {
+                                const name = r.reciter_name || r.translated_name?.name;
+                                const norm = normalizeName(name);
+                                if (map.has(norm)) {
+                                    const ex = map.get(norm);
+                                    if (!ex.sources.includes('Quran.com')) ex.sources.push('Quran.com');
+                                    ex.style = ex.style === 'Murattal' && r.style ? r.style : ex.style;
+                                } else {
+                                    map.set(norm, {
+                                        id: norm, name, normalizedName: norm,
+                                        sources: ['Quran.com'], language: 'ar', style: r.style || 'Murattal'
+                                    });
+                                }
+                            });
+                        }
+
+                        // Absolute failsafe: if ISP blocked ALL APIs
+                        if (map.size === 0) {
+                            map.set('alafasy', {
+                                id: 'alafasy', name: 'Mishary Rashid Alafasy (Built-in Fallback)', 
+                                normalizedName: 'alafasy', sources: ['EveryAyah'], 
+                                language: 'ar', style: 'Murattal', alQuranId: 'ar.alafasy'
+                            });
+                            setPlayerStatus('Operating in Network Fallback Mode');
+                        }
+
+                        const result = Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+                        setReciters(result);
+                        safeSetItem('reciters_cache', JSON.stringify(result));
+                        setLoadingState('');
+
+                    } catch (err) {
+                        // We will NEVER reach here unless React crashes, but just in case
+                        console.error(err);
+                        setReciters([{
+                            id: 'fallback', name: 'Mishary Alafasy (Offline Fallback)', 
+                            normalizedName: 'alafasy', sources: ['EveryAyah'], 
+                            language: 'ar', style: 'Murattal', alQuranId: 'ar.alafasy'
+                        }]);
+                        setLoadingState('');
+                    }
+                };
+
+                initData();
+            }, []);
+
+            useEffect(() => {
+                const audio = audioRef.current;
+                
+                const handlePlay = () => { setIsPlaying(true); setIsBuffering(false); };
+                const handlePause = () => setIsPlaying(false);
+                const handleWaiting = () => setIsBuffering(true);
+                const handlePlaying = () => setIsBuffering(false);
+                
+                const handleEnded = () => {
+                    if (playbackMode === 'ayah') {
+                        handleNext();
+                    } else if (activeSurah < 114) {
+                        setActiveSurah(prev => prev + 1);
+                        setActiveAyah(1);
+                        setTimeout(() => triggerPlayQueue(activeSurah + 1, 1, playbackMode), 500);
+                    }
+                };
+
+                const handleError = () => {
+                    setIsBuffering(false);
+                    if (currentQueue.length > 0 && queueIndex < currentQueue.length - 1) {
+                        const nextIdx = queueIndex + 1;
+                        setQueueIndex(nextIdx);
+                        setPlayerStatus(`Fallback: Trying ${currentQueue[nextIdx].sourceName}...`);
+                        audio.src = currentQueue[nextIdx].url;
+                        audio.play().catch(() => {}); // Suppress AbortErrors in console
+                    } else {
+                        setAudioError(true);
+                        setPlayerStatus('Audio unavailable for this source.');
+                        setIsPlaying(false);
+                    }
+                };
+
+                audio.addEventListener('play', handlePlay);
+                audio.addEventListener('pause', handlePause);
+                audio.addEventListener('waiting', handleWaiting);
+                audio.addEventListener('playing', handlePlaying);
+                audio.addEventListener('ended', handleEnded);
+                audio.addEventListener('error', handleError);
+
+                return () => {
+                    audio.removeEventListener('play', handlePlay);
+                    audio.removeEventListener('pause', handlePause);
+                    audio.removeEventListener('waiting', handleWaiting);
+                    audio.removeEventListener('playing', handlePlaying);
+                    audio.removeEventListener('ended', handleEnded);
+                    audio.removeEventListener('error', handleError);
+                };
+            }, [currentQueue, queueIndex, activeSurah, activeAyah, playbackMode]);
+
+            const buildQueue = (reciter, surahNum, ayahNum, mode) => {
+                if (!reciter) return [];
+                const queue = [];
+                const sPad = pad(surahNum, 3);
+                const aPad = pad(ayahNum, 3);
+                const globalAyah = getGlobalAyah(surahNum, ayahNum);
+                const secureMp3Server = ensureHttps(reciter.mp3QuranServer);
+
+                if (mode === 'surah') {
+                    if (secureMp3Server) queue.push({ url: `${secureMp3Server}${sPad}.mp3`, sourceName: 'MP3Quran' });
+                    if (reciter.alQuranId) queue.push({ url: `https://cdn.islamic.network/quran/audio-surah/128/${reciter.alQuranId}/${surahNum}.mp3`, sourceName: 'AlQuran Cloud' });
+                    queue.push({ url: `https://everyayah.com/data/Alafasy_128kbps/${sPad}001.mp3`, sourceName: 'EveryAyah (Ayah 1 Fallback)' });
+                } else {
+                    if (secureMp3Server) queue.push({ url: `${secureMp3Server}${sPad}${aPad}.mp3`, sourceName: 'MP3Quran' });
+                    if (reciter.alQuranId) queue.push({ url: `https://cdn.islamic.network/quran/audio/128/${reciter.alQuranId}/${globalAyah}.mp3`, sourceName: 'AlQuran Cloud' });
+                    queue.push({ url: `https://everyayah.com/data/Alafasy_128kbps/${sPad}${aPad}.mp3`, sourceName: 'EveryAyah Universal Fallback' });
+                }
+                return queue;
+            };
+
+            const triggerPlayQueue = (surahNum, ayahNum, mode) => {
+                if (!activeReciter) return;
+                const newQueue = buildQueue(activeReciter, surahNum, ayahNum, mode);
+                setCurrentQueue(newQueue);
+                setQueueIndex(0);
+                setAudioError(false);
+                
+                if (newQueue.length > 0) {
+                    setPlayerStatus(`Loading from ${newQueue[0].sourceName}...`);
+                    audioRef.current.src = newQueue[0].url;
+                    
+                    const playPromise = audioRef.current.play();
+                    if (playPromise !== undefined) {
+                        playPromise.then(() => {
+                            setPlayerStatus(`Playing via ${newQueue[0].sourceName}`);
+                        }).catch(e => {
+                            // DOM Exception AbortError caught silently
+                        });
+                    }
+                }
+            };
+
+            const togglePlayPause = () => {
+                if (!activeReciter) return alert('Please select a reciter from the list first.');
+                if (audioRef.current.src) {
+                    isPlaying ? audioRef.current.pause() : audioRef.current.play();
+                } else {
+                    triggerPlayQueue(activeSurah, activeAyah, playbackMode);
+                }
+            };
+
+            const handleNext = () => {
+                const maxAyahs = SURAH_AYAH_COUNTS[activeSurah - 1];
+                if (playbackMode === 'ayah') {
+                    if (activeAyah < maxAyahs) {
+                        const nAyah = activeAyah + 1;
+                        setActiveAyah(nAyah);
+                        triggerPlayQueue(activeSurah, nAyah, playbackMode);
+                    } else if (activeSurah < 114) {
+                        const nSurah = activeSurah + 1;
+                        setActiveSurah(nSurah);
+                        setActiveAyah(1);
+                        triggerPlayQueue(nSurah, 1, playbackMode);
+                    }
+                } else if (activeSurah < 114) {
+                    const nSurah = activeSurah + 1;
+                    setActiveSurah(nSurah);
+                    triggerPlayQueue(nSurah, 1, playbackMode);
+                }
+            };
+
+            const handlePrev = () => {
+                if (playbackMode === 'ayah') {
+                    if (activeAyah > 1) {
+                        const pAyah = activeAyah - 1;
+                        setActiveAyah(pAyah);
+                        triggerPlayQueue(activeSurah, pAyah, playbackMode);
+                    } else if (activeSurah > 1) {
+                        const pSurah = activeSurah - 1;
+                        setActiveSurah(pSurah);
+                        const pAyah = SURAH_AYAH_COUNTS[pSurah - 1];
+                        setActiveAyah(pAyah);
+                        triggerPlayQueue(pSurah, pAyah, playbackMode);
+                    }
+                } else if (activeSurah > 1) {
+                    const pSurah = activeSurah - 1;
+                    setActiveSurah(pSurah);
+                    triggerPlayQueue(pSurah, 1, playbackMode);
+                }
+            };
+
+            const onModeChange = (mode) => {
+                setPlaybackMode(mode);
+                if (isPlaying) triggerPlayQueue(activeSurah, activeAyah, mode);
+            };
+
+            const filteredReciters = useMemo(() => {
+                if (!searchTerm) return reciters;
+                return reciters.filter(r => r.name.toLowerCase().includes(searchTerm.toLowerCase()));
+            }, [reciters, searchTerm]);
+
+            useEffect(() => {
+                if (activeSurah > 0 && activeSurah <= 114) {
+                    const max = SURAH_AYAH_COUNTS[activeSurah - 1];
+                    if (activeAyah > max) setActiveAyah(max);
+                }
+            }, [activeSurah]);
+
+            return (
+                <div className="min-h-screen flex flex-col font-sans">
+                    <header className="bg-dark-900 border-b border-dark-700 py-6 px-4 md:px-8 shadow-md sticky top-0 z-50">
+                        <div className="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+                            <div>
+                                <h1 className="text-2xl font-bold text-primary-500 tracking-wide flex items-center gap-2">
+                                    Quran Audio Archiver
+                                </h1>
+                                <p className="text-sm text-dark-600 mt-1">
+                                    {reciters.length > 0 ? `${reciters.length} Reciters Available` : 'Database check...'}
+                                </p>
+                            </div>
+
+                            <div className="flex items-center gap-4 bg-dark-800 p-3 rounded-full shadow-inner border border-dark-700 w-full md:w-auto overflow-hidden">
+                                <button onClick={handlePrev} className="p-2 hover:bg-dark-700 rounded-full transition text-slate-300 hover:text-white">
+                                    <IconSkipBack />
+                                </button>
+                                <button 
+                                    onClick={togglePlayPause} 
+                                    className="p-3 bg-primary-600 hover:bg-primary-500 rounded-full transition text-white shadow-lg flex items-center justify-center relative"
+                                >
+                                    {isBuffering ? <IconLoader /> : (isPlaying ? <IconPause /> : <IconPlay />)}
+                                </button>
+                                <button onClick={handleNext} className="p-2 hover:bg-dark-700 rounded-full transition text-slate-300 hover:text-white">
+                                    <IconSkipForward />
+                                </button>
+                                
+                                <div className="hidden md:flex flex-col ml-4 mr-2 border-l border-dark-600 pl-4 min-w-[200px]">
+                                    <span className="text-xs font-semibold text-slate-400 truncate">
+                                        {activeReciter ? activeReciter.name : 'Select a reciter below'}
+                                    </span>
+                                    <span className={`text-[10px] ${audioError ? 'text-red-400' : 'text-primary-500'} truncate`}>
+                                        {playerStatus}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+
+                    <main className="flex-1 max-w-6xl w-full mx-auto p-4 md:p-8 grid grid-cols-1 lg:grid-cols-3 gap-8">
+                        <div className="lg:col-span-1 space-y-6">
+                            <div className="bg-dark-800 border border-dark-700 rounded-xl p-5 shadow-lg">
+                                <h2 className="text-lg font-semibold mb-4 border-b border-dark-700 pb-2">Playback Options</h2>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs font-medium text-dark-600 uppercase mb-1">Playback Mode</label>
+                                        <div className="flex bg-dark-900 rounded-lg p-1 border border-dark-700">
+                                            <button 
+                                                className={`flex-1 py-1.5 text-sm font-medium rounded-md transition ${playbackMode === 'surah' ? 'bg-dark-700 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                                                onClick={() => onModeChange('surah')}
+                                            >Full Surah</button>
+                                            <button 
+                                                className={`flex-1 py-1.5 text-sm font-medium rounded-md transition ${playbackMode === 'ayah' ? 'bg-dark-700 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                                                onClick={() => onModeChange('ayah')}
+                                            >Verse by Verse</button>
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-medium text-dark-600 uppercase mb-1">Surah</label>
+                                        <select 
+                                            value={activeSurah} 
+                                            onChange={(e) => setActiveSurah(Number(e.target.value))}
+                                            className="w-full bg-dark-900 border border-dark-700 text-slate-200 text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 outline-none"
+                                        >
+                                            {surahs.length > 0 
+                                                ? surahs.map(s => <option key={s.number} value={s.number}>{s.number}. {s.englishName} ({s.name})</option>)
+                                                : Array.from({length: 114}).map((_, i) => <option key={i+1} value={i+1}>Surah {i+1}</option>)
+                                            }
+                                        </select>
+                                    </div>
+
+                                    {playbackMode === 'ayah' && (
+                                        <div>
+                                            <label className="block text-xs font-medium text-dark-600 uppercase mb-1">Ayah</label>
+                                            <select 
+                                                value={activeAyah} 
+                                                onChange={(e) => setActiveAyah(Number(e.target.value))}
+                                                className="w-full bg-dark-900 border border-dark-700 text-slate-200 text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 outline-none"
+                                            >
+                                                {Array.from({ length: SURAH_AYAH_COUNTS[activeSurah - 1] || 1 }).map((_, i) => (
+                                                    <option key={i+1} value={i+1}>Verse {i+1}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    )}
+
+                                    <button 
+                                        onClick={() => triggerPlayQueue(activeSurah, activeAyah, playbackMode)}
+                                        className="w-full py-2.5 bg-dark-700 hover:bg-primary-600 text-white font-medium rounded-lg transition shadow border border-dark-600 hover:border-primary-500 mt-2"
+                                    >Load & Play</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="lg:col-span-2 space-y-4">
+                            <input 
+                                type="text" 
+                                placeholder="Search over 500+ reciters by name..." 
+                                value={searchTerm}
+                                onChange={(e) => setSearchTerm(e.target.value)}
+                                className="w-full bg-dark-800 border border-dark-700 text-slate-200 text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-3 outline-none shadow-sm"
+                            />
+
+                            {loadingState && (
+                                <div className="text-center py-10 text-primary-500 animate-pulse flex flex-col items-center gap-3">
+                                    <IconLoader /><span>{loadingState}</span>
+                                </div>
+                            )}
+
+                            {!loadingState && (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 auto-rows-max h-[600px] overflow-y-auto pr-2 pb-10">
+                                    {filteredReciters.length === 0 ? (
+                                        <div className="col-span-full text-center py-10 text-dark-600">No reciters match your search.</div>
+                                    ) : (
+                                        filteredReciters.map(reciter => (
+                                            <div 
+                                                key={reciter.id} 
+                                                onClick={() => {
+                                                    setActiveReciter(reciter);
+                                                    setTimeout(() => triggerPlayQueue(activeSurah, activeAyah, playbackMode), 50);
+                                                }}
+                                                className={`p-4 rounded-xl cursor-pointer transition border flex flex-col justify-between ${
+                                                    activeReciter?.id === reciter.id 
+                                                        ? 'bg-primary-900/20 border-primary-500 shadow-[0_0_15px_rgba(16,185,129,0.1)]' 
+                                                        : 'bg-dark-800 border-dark-700 hover:border-dark-600 hover:bg-dark-700/50 shadow-sm'
+                                                }`}
+                                            >
+                                                <div>
+                                                    <h3 className="font-semibold text-slate-100 line-clamp-1">{reciter.name}</h3>
+                                                    <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                                                        Style: <span className="text-slate-300">{reciter.style}</span>
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </main>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
+```[[1](https://www.google.com/url?sa=E&q=https%3A%2F%2Fapi.quran.com%2Fapi%2Fv4%2Fresources%2Frecitations)][[2](https://www.google.com/url?sa=E&q=https%3A%2F%2Fapi.mp3quran.net%2Freciters)]
